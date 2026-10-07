@@ -1,0 +1,35 @@
+{
+  "name": "Narviko paper-to-live matcher",
+  "version": "C",
+  "description": "Match every live broker fill to its planned (paper) leg on instrument, planned qty and time; flag short or missing legs; attribute the Rs gap only on matched rows.",
+  "status": {
+    "manual": "Run by hand on 2 traders, 14 Sep 2026 (Excel). See evidence/09-process-map.md",
+    "automated": "Planned, v1 weeks 2-3. Not built yet."
+  },
+  "inputs": [
+    {"id": "tradebook", "source": "Zerodha Console tradebook CSV (live fills)", "fields": ["trade_id", "order_id", "tradingsymbol", "exchange", "trade_type", "quantity", "price", "order_execution_time"]},
+    {"id": "planned", "source": "Trader's bot planned orders / paper book export", "fields": ["plan_id", "strategy", "tradingsymbol", "side", "planned_qty", "planned_price", "signal_time", "structure_id"]}
+  ],
+  "params": {
+    "match_window_seconds": 60,
+    "attribution_target_pct": 80,
+    "attribution_kill_pct": 50,
+    "causes": ["slippage", "missed-fill", "partial-leg", "timing", "bot-defect", "broker-reject", "unexplained"]
+  },
+  "steps": [
+    {"id": 1, "name": "ingest", "type": "D", "do": "Load tradebook and planned orders. Read-only. No broker access."},
+    {"id": 2, "name": "validate", "type": "D", "do": "Reject rows without symbol, qty or timestamp. Check one session only. Recompute qty x (price - entry) per row against the trader's total.", "why": "Trader A: no per-leg paper price. Trader B: no timestamps, expiries across 9 months."},
+    {"id": 3, "name": "match", "type": "D", "do": "For each planned leg find live fills with same tradingsymbol and side, fill time within match_window_seconds of signal_time. Sum filled qty per leg.", "output": "matched | unmatched_plan | unmatched_fill", "note": "Bottleneck step (#5 in process map). Everything after depends on it."},
+    {"id": 4, "name": "leg_check", "type": "D", "do": "Per structure_id compare planned_qty vs filled_qty per leg. Flag short or missing legs immediately.", "example": "Trader A, NIFTY: 5 short lots vs 1 long lot per side -> 4 lots unhedged, unnoticed.", "alert": "Telegram, same session"},
+    {"id": 5, "name": "slippage", "type": "D", "do": "Only on matched rows: slippage_rs = (fill_price - planned_price) x qty x side_sign; bps = slippage_rs / (planned_price x qty) x 10000; latency_ms = fill_time - signal_time."},
+    {"id": 6, "name": "attribute", "type": "P", "do": "Tag each gap row with one cause. unmatched_plan -> missed-fill; short leg -> partial-leg; matched -> slippage or timing; anything else -> unexplained."},
+    {"id": 7, "name": "score", "type": "D", "do": "attributed_pct = sum(|gap| rows with cause != unexplained) / sum(|gap| all rows) x 100. Gross gap, not net, so causes cannot cancel."},
+    {"id": 8, "name": "report", "type": "D", "do": "One page per session: leg flags first, then Rs gap by cause, then unexplained rows. Every line traces to a contract note."},
+    {"id": 9, "name": "review", "type": "H", "do": "Send to trader. Ask: planned or mistake? What would you change? No leading questions."}
+  ],
+  "measured_results": [
+    {"user": "Trader A", "date": "2026-09-14", "gross_gap_rs": 22884, "attributed_rs": 0, "attributed_pct": 0.0, "leg_flag": "NIFTY 4 lots unhedged per side", "decision_changed": "Check all legs match expected qty before adding real money"},
+    {"user": "Trader B", "date": "2026-09-14", "gross_gap_rs": 154326, "attributed_rs": 8530, "attributed_pct": 5.5, "leg_flag": "none (single legs)", "decision_changed": "Fix futures price source first; if gap is real, change order type or entry logic"}
+  ],
+  "falsifier": "If data has timestamps and planned qty and attributed_pct is still below 50, OR the next 2 traders say a leg mismatch has never happened to them, version C is wrong."
+}
